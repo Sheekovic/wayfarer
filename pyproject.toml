@@ -13,12 +13,18 @@ keywords = ["scraping", "web", "http", "tls-fingerprint", "anti-detect", "camouf
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Topic :: Internet :: WWW/HTTP",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-# Before publishing: Repository = "https://github.com/<you>/wayfarer"
 dependencies = ["curl_cffi>=0.14"]
+
+[project.urls]
+Homepage = "https://github.com/Sheekovic/wayfarer"
+Repository = "https://github.com/Sheekovic/wayfarer"
+Issues = "https://github.com/Sheekovic/wayfarer/issues"
+Changelog = "https://github.com/Sheekovic/wayfarer/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # Render pages in the browser already on the machine.
