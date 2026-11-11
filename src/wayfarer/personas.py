@@ -101,7 +101,10 @@ class Persona:
     #: Proxy this identity is bound to; the persona travels with it.
     proxy: Optional[str] = None
     exit_ip: str = ""
-    #: Firefox profile directory, so a persistent context keeps its state.
+    #: Default location of the persona file itself, used by ``save()`` when no
+    #: path is given. Not a browser profile: render() opens a fresh context each
+    #: time and restores cookies from the session, so continuity lives in this
+    #: file rather than in a Firefox profile directory on disk.
     profile_dir: str = ""
     #: Hosts this persona has met, by hostname.
     hosts: Dict[str, HostTrust] = field(default_factory=dict)

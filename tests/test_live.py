@@ -10,7 +10,7 @@ import os
 import pytest
 
 from wayfarer import Persona, Session, diagnose, lint
-from wayfarer.detect import fingerprint_draws
+from wayfarer.detect import fingerprint_draws, load_reports
 from wayfarer.stealth import ARTIFACT, camoufox_version, require_camoufox
 
 def live(fn):
@@ -22,6 +22,7 @@ def live(fn):
     return pytest.mark.live(skip(fn))
 
 LOCAL_PAGE = "about:blank"
+BOT_TEST_PAGE = "https://bot.sannysoft.com/"
 
 
 def signals_for(session, url=LOCAL_PAGE):
@@ -122,6 +123,40 @@ def test_a_rendered_page_still_carries_the_session_cookies(site):
         s.render(site.url + "/js", wait_for="#done", timeout=90)
         served = s.visit(site.url + "/echo").json()
     assert "jsid=42" in served.get("cookie", "")
+
+
+@live
+def test_a_public_bot_test_page_adds_no_new_hard_leaks(tmp_path):
+    """bot.sannysoft.com, judged against the baseline this repo committed.
+
+    The page is the one bot detectors were demonstrated on, so it is the closest
+    thing to an outside opinion we can get without a paid detector. It is a 2013
+    static page on a volunteer's server, so not reaching it is a skip: the value
+    here is the comparison against our own numbers, not whether that host is up
+    tonight. Warn-level differences are allowed -- the page does make Firefox
+    report window.chrome, which is worth knowing -- but nothing that a detector
+    would call an outright automated browser.
+    """
+    require_camoufox()
+    baseline_path = os.path.join(os.path.dirname(__file__), "baselines", "camoufox.json")
+    if not os.path.isfile(baseline_path):
+        pytest.skip("no committed baseline to compare against")
+    baseline = next(iter(load_reports(baseline_path).values()), None)
+    if baseline is None:
+        pytest.skip("the committed baseline is empty")
+
+    try:
+        reports = diagnose(["camoufox"], url=BOT_TEST_PAGE, timeout=120)
+    except Exception as exc:
+        pytest.skip(f"could not reach {BOT_TEST_PAGE}: {str(exc).splitlines()[0]}")
+
+    found = reports[0]
+    if not found.signals.get("userAgent"):
+        pytest.skip(f"the probe read nothing from {BOT_TEST_PAGE}")
+    hard = {leak.code for leak in found.hard_leaks}
+    before = {leak.code for leak in baseline.hard_leaks}
+    assert not (hard - before), f"new hard leaks on the test page: {sorted(hard - before)}"
+    assert "webdriver_flag" not in hard and "headless_user_agent" not in hard
 
 
 @live

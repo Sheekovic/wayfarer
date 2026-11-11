@@ -250,9 +250,10 @@ it is the honest answer for Chrome-only sites that test V8 quirks Camoufox canno
   on Chrome/V8-specific behaviour need the P5 real-Chrome path, not a better Firefox.
 - **`cf_clearance` is fragile** (bound to IP + UA, sensitive to TLS). The design assumes
   handoff *may* fail and says so loudly; only P3's live test will tell us how often.
-- **Version skew** between Camoufox's Firefox 158 build and `curl_cffi`'s newest Firefox 144
-  target. We pin and verify rather than hope; if the gap is fatal for handoff, we cap the
-  persona's Firefox version to what both sides can express (`ff_version` exists in Camoufox).
+- **Version skew** between Camoufox's Firefox 158 build and `curl_cffi`'s newest Firefox
+  target — 144 when this was planned, 155 at release, still not 158. We pin and verify rather
+  than hope; if the gap is fatal for handoff, we cap the persona's Firefox version to what
+  both sides can express (`ff_version` exists in Camoufox). `doctor` prints both.
 - **Solvers are a paid third party**: 10–40 s latency, roughly $0.60–$2.50 per 1,000,
   and `ERROR_CAPTCHA_UNSOLVABLE` happens. Never silent: cost lands in `ChallengeError.trail`.
 - **Install weight**: Camoufox's binary is ~200 MB plus a fetch step; it stays an extra, and
@@ -289,6 +290,8 @@ are committed as `tests/test_live.py` (run with `WAYFARER_LIVE=1`) plus
 | A persona is the same visitor tomorrow | Two launches from one saved persona file: user agent, WebGL vendor **and** renderer, screen, timezone, `hardwareConcurrency`, platform all identical. Audio and WebGL-parameter draws identical. |
 | …with one honest exception | The **canvas** draw differs between launches: Camoufox 0.5.9 re-randomises canvas per launch rather than seeding it from the pinned identity. Documented as a limit, asserted nowhere, because it is upstream's choice. |
 | The solver ladder works without a paid account | Turnstile sitekey extraction, task shape, polling, token injection and the give-up trail are covered against a fake transport (35 offline checks). The network half has never seen a real key — `doctor --balance` is the first thing to run with one. |
+| An outside page agrees | `bot.sannysoft.com`, loaded in a live Camoufox and compared with the committed baseline: **no new hard leaks**, and neither `webdriver_flag` nor `headless_user_agent` appears. Committed as a live-gated check that skips when the (volunteer-run, 2013-era) host is unreachable. |
+| P1's "persistent profile dir" | Deliberately not a Firefox profile directory. `render()` opens a fresh context per call and restores cookies from the session, which keeps the proxy binding and the per-render isolation intact; continuity lives in the persona file. `Persona.profile_dir` names the persona file's location, not a browser profile, and says so in its docstring. |
 
 Two things this section exists to stop being rediscovered: the disguise is only as good as
 the *pairing* of its parts (Camoufox ↔ Playwright ↔ `curl_cffi`), and every claim above is a
