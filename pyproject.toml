@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wayfarer"
+version = "0.2.0"
+description = "Visit websites from Python the way a real browser would: browser TLS and headers without a browser, and a disguised browser when the site insists."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["scraping", "web", "http", "tls-fingerprint", "anti-detect", "camoufox", "captcha"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+# Before publishing: Repository = "https://github.com/<you>/wayfarer"
+dependencies = ["curl_cffi>=0.14"]
+
+[project.optional-dependencies]
+# Render pages in the browser already on the machine.
+browser = ["playwright>=1.40"]
+# Render in Camoufox, whose fingerprint is spoofed in the engine. Camoufox
+# downloads its own ~200 MB Firefox build on first use.
+stealth = ["camoufox>=0.5.9", "playwright>=1.40"]
+# CAPTCHA solving needs no extra package, only a key: CAPMONSTER_API_KEY or
+# TWOCAPTCHA_API_KEY.
+dev = ["pytest>=8", "playwright>=1.40", "camoufox>=0.5.9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["live: needs a real browser and a network; runs only with WAYFARER_LIVE=1"]
