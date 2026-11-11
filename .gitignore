@@ -1,0 +1,23 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+*.egg-info/
+build/
+dist/
+
+# Environments and local state
+.venv/
+venv/
+.env
+cookies.json
+personas/
+persona.json
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

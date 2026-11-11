@@ -1,0 +1,7 @@
+# Keep line endings in the repository as they are, so a Windows contributor's
+# commits do not rewrite every file in the diff.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
