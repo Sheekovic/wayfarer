@@ -10,7 +10,7 @@ import os
 import pytest
 
 from wayfarer import Persona, Session, diagnose, lint
-from wayfarer.detect import collect_signals
+from wayfarer.detect import fingerprint_draws
 from wayfarer.stealth import ARTIFACT, camoufox_version, require_camoufox
 
 def live(fn):
@@ -53,14 +53,25 @@ def test_camoufox_does_not_admit_it_is_automated():
 
 @live
 def test_the_gpu_string_wayfarer_rewrites_actually_lands():
-    """The point of patch_webgl, checked where a detector would read it."""
+    """The point of patch_webgl, checked where a detector would read it.
+
+    Two things can go wrong here and both matter: the rewrite stops landing (the
+    hedge reappears), or WebGL goes away entirely -- headless Firefox on a
+    machine with no reachable GPU does that, and a desktop browser with no
+    WebGL is its own tell. So the test pins the string when there is one, and
+    pins that wayfarer *notices* when there is not.
+    """
     require_camoufox()
     with Session("firefox", stealth=True, persona=Persona.new(), on_challenge="ignore") as s:
         signals = signals_for(s)
     renderer = signals.get("webglRenderer") or ""
-    assert renderer, "no WebGL renderer reported"
+    leaks = {leak.code for leak in lint(signals)}
+    if not renderer:
+        assert "webgl_missing" in leaks, "a visitor with no WebGL and nobody saying so"
+        pytest.skip("this machine gave the headless browser no WebGL; re-run headed to "
+                    "check the rewritten renderer string")
     assert ARTIFACT not in renderer, f"Camoufox's hedge survived the rewrite: {renderer}"
-    assert "webgl_vague_gpu" not in {leak.code for leak in lint(signals)}
+    assert "webgl_vague_gpu" not in leaks
 
 
 @live
@@ -73,9 +84,35 @@ def test_the_identity_survives_a_restart():
     again = Persona.from_dict(persona.to_dict())
     with Session("firefox", stealth=True, persona=again, on_challenge="ignore") as s:
         second = signals_for(s)
-    assert first["userAgent"] == second["userAgent"]
-    assert first["webglRenderer"] == second["webglRenderer"]
-    assert first["screen"] == second["screen"]
+    for key in ("userAgent", "webglVendor", "webglRenderer", "screen", "timezone",
+                "hardwareConcurrency", "platform"):
+        assert first[key] == second[key], f"{key} changed across launches: {first[key]!r} -> {second[key]!r}"
+
+
+@live
+def test_draws_that_should_be_stable_are_stable():
+    """What a site can actually use to recognise this browser again.
+
+    Canvas is deliberately not asserted: Camoufox 0.5.9 re-randomises canvas
+    readback on each launch, so it is a per-launch value. The audio and WebGL
+    parameter draws are the ones that carry across, and that is what this pins.
+    """
+    require_camoufox()
+    draws = {}
+
+    def look(page, snapshot):
+        draws.update(fingerprint_draws(page))
+
+    persona = Persona.new()
+    with Session("firefox", stealth=True, persona=persona, on_challenge="ignore") as s:
+        s.render("about:blank", wait_until="domcontentloaded", timeout=120, on_page=look)
+        first = dict(draws)
+        draws.clear()
+        s.render("about:blank", wait_until="domcontentloaded", timeout=120, on_page=look)
+        second = dict(draws)
+    assert set(first) >= {"canvas", "audio", "webglParams"}
+    assert first["audio"] == second["audio"] and first["webglParams"] == second["webglParams"], \
+        "within one browser, the same draws should come out the same"
 
 
 @live

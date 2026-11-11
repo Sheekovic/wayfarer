@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
+import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 from urllib.parse import urlsplit
@@ -44,6 +46,43 @@ def _persona_for(persona: Any, stealth: bool, languages: Sequence[str]) -> Optio
     if loaded is None:
         return Persona.new(languages=tuple(languages))
     return loaded
+
+
+def _firefox_version(user_agent: str) -> str:
+    """The version a Firefox user agent states, or "" for any other browser.
+
+    Splitting on "Firefox/" is tempting and wrong for Safari, whose user agent
+    ends in "Version/17.4 Safari/605.1.15": the split returns the whole string,
+    which then reads like a browser version nobody has ever seen.
+    """
+    match = re.search(r"(?:^|[^A-Za-z])Firefox/([\d.]+)", user_agent)
+    return match.group(1) if match else ""
+
+
+def _page_user_agent(page: Any) -> str:
+    """The user agent this live page is actually sending.
+
+    A solver has to be told what the browser really said, not what the persona
+    was drawn with: Camoufox reports the Firefox it is built on, which is newer
+    than most recorded device records, and Cloudflare binds its clearance to the
+    exact string that earned it. Returns "" for an async page, where the await
+    version applies.
+    """
+    try:
+        value = page.evaluate("navigator.userAgent")
+    except Exception:
+        return ""
+    return "" if inspect.isawaitable(value) else str(value or "")
+
+
+async def _apage_user_agent(page: Any) -> str:
+    try:
+        value = page.evaluate("navigator.userAgent")
+        if inspect.isawaitable(value):
+            value = await value
+        return str(value or "")
+    except Exception:
+        return ""
 
 
 class _Core:
@@ -226,7 +265,7 @@ class _Common:
             "engine": "camoufox" if self._core.stealth else "playwright",
             "profile": self._core.profile.name,
             "user_agent": signals.get("userAgent") or (persona.claimed_ua if persona else ""),
-            "browser_version": signals.get("userAgent", "").split("Firefox/")[-1].split(" ")[0]
+            "browser_version": _firefox_version(str(signals.get("userAgent") or ""))
             or (str(persona.ff_version) if persona and persona.ff_version else ""),
             "timezone": signals.get("timezone") or (persona.timezone if persona else ""),
             "exit_ip": persona.exit_ip if persona else "",
@@ -450,7 +489,16 @@ class Session(_Common):
             raise ChallengeError(challenge, response, self._trail)
         self._solved.add(host)
         self._trail.append("loading it in a browser as the same visitor")
-        page = self.render(url, on_page=self._solve_hook)
+        try:
+            page = self.render(url, on_page=self._solve_hook)
+        except RenderError as exc:
+            # A browser that could not load says nothing about the site's verdict.
+            # Spend the host's one walk on a verdict, not on a proxy that was
+            # briefly down, or every later request here would be refused by our
+            # own bookkeeping.
+            self._solved.discard(host)
+            self._trail.append(f"the browser rung failed: {exc}")
+            raise ChallengeError(challenge, response, self._trail) from exc
         fresh = detect_challenge(page)
         if fresh is None:
             self._trail.append("it loaded; its cookies now belong to the plain path")
@@ -487,7 +535,8 @@ class Session(_Common):
             return False
         try:
             solved = solver.solve(kind, sitekey=sitekey, url=snapshot.url, proxy=core.proxy,
-                                   user_agent=self.identity["user_agent"], page_html=html)
+                                   user_agent=_page_user_agent(page) or self.identity["user_agent"],
+                                   page_html=html)
         except SolverError as exc:
             self._trail.append(f"solver failed: {exc}")
             return False
@@ -713,7 +762,14 @@ class AsyncSession(_Common):
             raise ChallengeError(challenge, response, self._trail)
         self._solved.add(host)
         self._trail.append("loading it in a browser as the same visitor")
-        page = await self.render(url, on_page=self._solve_hook)
+        try:
+            page = await self.render(url, on_page=self._solve_hook)
+        except RenderError as exc:
+            # See the sync twin: a browser that failed to load is not a verdict,
+            # and must not use up the host's one walk.
+            self._solved.discard(host)
+            self._trail.append(f"the browser rung failed: {exc}")
+            raise ChallengeError(challenge, response, self._trail) from exc
         fresh = detect_challenge(page)
         if fresh is None:
             self._trail.append("it loaded; its cookies now belong to the plain path")
@@ -751,7 +807,8 @@ class AsyncSession(_Common):
         try:
             solved = await asyncio.to_thread(
                 solver.solve, kind, sitekey=sitekey, url=snapshot.url, proxy=core.proxy,
-                user_agent=self.identity["user_agent"], page_html=html)
+                user_agent=await _apage_user_agent(page) or self.identity["user_agent"],
+                page_html=html)
         except SolverError as exc:
             self._trail.append(f"solver failed: {exc}")
             return False

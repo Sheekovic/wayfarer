@@ -14,6 +14,7 @@ be made about vanilla Playwright, Camoufox, or a site's own verdict.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -170,14 +171,51 @@ def collect_signals(page: Any) -> Dict[str, Any]:
 
 
 def fingerprint_draws(page: Any) -> Dict[str, str]:
-    """Hash the canvas, GPU and audio draws, so two loads can be compared."""
+    """Hash the canvas, GPU and audio draws, so two loads can be compared.
+
+    Measured on Camoufox 0.5.9 across two launches of one saved persona: the
+    audio and WebGL-parameter draws are identical, the canvas draw is not --
+    Camoufox re-randomises canvas per launch rather than seeding it from the
+    pinned identity. So these hashes carry continuity within a session, and the
+    canvas one is a per-launch value, not a per-persona one.
+    """
     try:
-        draws = page.evaluate(DRAWS_JS) or {}
+        return _hash_draws(page.evaluate(DRAWS_JS))
     except Exception:
         return {}
+
+
+async def collect_signals_async(page: Any) -> Dict[str, Any]:
+    """Awaitable twin of :func:`collect_signals`, for a page from an async session.
+
+    Handing the sync probe an async page is quietly wrong rather than loudly
+    wrong: ``evaluate`` returns a coroutine, the JavaScript never runs, and every
+    measurement comes back blank -- which looks like a clean browser.
+    """
+    try:
+        value = page.evaluate(SIGNALS_JS)
+        if inspect.isawaitable(value):
+            value = await value
+        return dict(value or {})
+    except Exception:
+        return {}
+
+
+async def fingerprint_draws_async(page: Any) -> Dict[str, str]:
+    """Awaitable twin of :func:`fingerprint_draws`."""
+    try:
+        draws = page.evaluate(DRAWS_JS)
+        if inspect.isawaitable(draws):
+            draws = await draws
+    except Exception:
+        return {}
+    return _hash_draws(draws)
+
+
+def _hash_draws(draws: Any) -> Dict[str, str]:
     return {
         key: hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
-        for key, value in dict(draws).items()
+        for key, value in dict(draws or {}).items()
     }
 
 
@@ -251,7 +289,8 @@ def lint(signals: Dict[str, Any], persona: Optional[Persona] = None) -> List[Lea
                      f"the persona promises {persona.timezone}, the browser reports {signals['timezone']}"))
         claimed = persona.claimed_ua
         if claimed and ua and claimed != ua:
-            add(Leak("ua_mismatch", f"the persona's user agent is not the one being sent", "warn"))
+            add(Leak("ua_mismatch",
+                     f"the persona claims {claimed[:60]}, the browser sends {ua[:60]}", "warn"))
         if persona.languages and signals.get("languages"):
             first = str(signals["languages"][0] or "")
             if first and first.split("-")[0] != persona.languages[0].split("-")[0]:
@@ -267,6 +306,16 @@ def report(engine: str, signals: Dict[str, Any], persona: Optional[Persona] = No
 
 
 def save_reports(reports: Sequence[Report], path: str) -> None:
+    """Write the reports as JSON, creating the directory if it has no reason not to exist.
+
+    ``python -m wayfarer diagnose --json tests/baselines/camoufox.json`` is the
+    documented way to pin a baseline, and a first-time clone has no such folder.
+    """
+    import os
+
+    parent = os.path.dirname(str(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     payload = {"reports": [report.to_dict() for report in reports]}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)

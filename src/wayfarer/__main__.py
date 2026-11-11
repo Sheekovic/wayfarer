@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -74,6 +75,38 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return 1 if (args.fail_on_leak and leaks) else 0
 
 
+def _playwright_fit(installed: str) -> str:
+    """Whether Playwright is inside the range Camoufox says it can drive.
+
+    The bound comes out of Camoufox's own metadata rather than being written
+    here, so it stays true when either package moves. Getting it wrong is not a
+    warning but a launch that dies inside ``new_context``, which reads like a
+    broken browser instead of an unsupported combination.
+    """
+    try:
+        from importlib.metadata import requires
+
+        specs = [line.split(";")[0].strip() for line in (requires("camoufox") or [])
+                 if line.strip().lower().startswith("playwright")]
+    except Exception:
+        return ""
+    if not specs or installed.startswith("not installed"):
+        return ""
+
+    def number(text: str):
+        return tuple(int(part) for part in text.split(".") if part.isdigit())
+
+    have = number(installed)
+    for operator, value in re.findall(r"(<=|>=|<|==)\s*([\d.]+)", specs[0]):
+        want = number(value)
+        outside = (have >= want) if operator == "<" else \
+                  (have > want) if operator == "<=" else \
+                  (have < want) if operator == ">=" else (have != want)
+        if outside:
+            return f"{installed} does not satisfy {specs[0]}: Camoufox will fail to open a context"
+    return f"{installed} satisfies {specs[0]}"
+
+
 def _doctor() -> Dict[str, str]:
     facts: Dict[str, str] = {}
     facts["wayfarer"] = __version__
@@ -92,16 +125,22 @@ def _doctor() -> Dict[str, str]:
         facts["playwright"] = version("playwright")
     except Exception:
         facts["playwright"] = "not installed (pip install 'wayfarer[browser]')"
+    from . import stealth
+
+    facts["camoufox"] = stealth.camoufox_version() or "not installed (pip install 'wayfarer[stealth]')"
     try:
         from camoufox.pkgman import camoufox_path  # type: ignore
 
-        from . import stealth
-
-        facts["camoufox"] = stealth.camoufox_version() or "?"
-        path = camoufox_path()
-        facts["camoufox browser"] = f"{path} ({'present' if os.path.isdir(path) else 'missing'})"
+        # download_if_missing=False: the default fetches ~200 MB, and a command
+        # whose job is to report the state of the machine should not change it.
+        path = str(camoufox_path(download_if_missing=False))
+        facts["camoufox browser"] = f"{path} " \
+                                    f"({'present' if os.path.isdir(path) else 'missing: run python -m camoufox fetch'})"
     except Exception as exc:
-        facts["camoufox"] = f"not usable: {str(exc).splitlines()[0]}"
+        facts["camoufox browser"] = f"could not be located: {str(exc).splitlines()[0]}"
+    note = _playwright_fit(facts.get("playwright", ""))
+    if note:
+        facts["playwright for camoufox"] = note
     for name, env in (("CapMonster", "CAPMONSTER_API_KEY"), ("2Captcha", "TWOCAPTCHA_API_KEY")):
         facts[f"{name} key"] = "set" if os.environ.get(env) else f"unset (set {env})"
     try:
@@ -126,7 +165,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for name, value in facts.items():
         print(f"{name.ljust(width)}  {value}")
     if args.balance:
-        from .solvers import SolverError, solver_from_env
+        from .solvers import solver_from_env
 
         solver = solver_from_env()
         if solver is None:
@@ -135,7 +174,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             try:
                 print(f"\n{solver.provider if hasattr(solver, 'provider') else solver}: "
                       f"balance {solver.balance()}")
-            except (SolverError, Exception) as exc:
+            except Exception as exc:
                 print(f"\nthe key did not answer: {exc}")
                 return 1
     return 0

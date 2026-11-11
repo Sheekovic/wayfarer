@@ -38,7 +38,7 @@ RESPONSE_FIELDS = {
     "cf_clearance": "",           # a cookie, not a field
     "recaptcha_v2": "g-recaptcha-response",
     "recaptcha_v3": "g-recaptcha-response",
-    "hcaptcha": "g-recaptcha-response",
+    "hcaptcha": "h-captcha-response",
 }
 
 #: Rough price per 1000, for the trail. Published rates move; these are for
@@ -63,6 +63,21 @@ class SolverError(WayfarerError):
         super().__init__(f"{provider}: {code or 'error'} {message}".strip())
 
 
+def _transport_error(url: str, exc: Exception) -> SolverError:
+    """Report a dead call as a dead call, with the URL in the message.
+
+    A provider is something with a key and an account behind it. When the socket
+    or the JSON is what broke, naming the URL as the provider makes the trail
+    read as if a solver refused the task, and the reader goes looking at task
+    types instead of at the network.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return SolverError("solver API", f"HTTP {exc.code}", url)
+    if isinstance(exc, ValueError):           # json.JSONDecodeError and friends
+        return SolverError("solver API", "BAD_RESPONSE", f"{url} did not answer JSON")
+    return SolverError("solver API", type(exc).__name__, f"{url}: {exc}")
+
+
 def http_get(url: str, *, timeout: float = 30.0) -> Dict[str, Any]:
     """GET and read JSON. 2Captcha reads its balance this way."""
     import json
@@ -70,10 +85,8 @@ def http_get(url: str, *, timeout: float = 30.0) -> Dict[str, Any]:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
             return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise SolverError(url, message=f"HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise SolverError(url, message=str(exc)) from exc
+    except Exception as exc:                  # noqa: BLE001 - re-raised, not swallowed
+        raise _transport_error(url, exc) from exc
 
 
 def http_transport(url: str, headers: Mapping[str, str], body: Any, *, timeout: float = 30.0) -> Dict[str, Any]:
@@ -85,10 +98,8 @@ def http_transport(url: str, headers: Mapping[str, str], body: Any, *, timeout: 
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise SolverError(url, message=f"HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise SolverError(url, message=str(exc)) from exc
+    except Exception as exc:                  # noqa: BLE001 - re-raised, not swallowed
+        raise _transport_error(url, exc) from exc
 
 
 def proxy_fields(proxy: Optional[str]) -> Dict[str, str]:
@@ -98,10 +109,14 @@ def proxy_fields(proxy: Optional[str]) -> Dict[str, str]:
     parts = urlsplit(proxy)
     if not parts.hostname:
         raise ValueError(f"not a proxy URL: {proxy!r}")
+    scheme = (parts.scheme or "http").replace("socks5h", "socks5")
     fields = {
-        "proxyType": (parts.scheme or "http").replace("socks5h", "socks5"),
+        "proxyType": scheme,
         "proxyAddress": parts.hostname,
-        "proxyPort": str(parts.port or 80),
+        # A bare host means its protocol's own port. Guessing 80 for a SOCKS
+        # proxy sends the solver's traffic to a web server, which reports back
+        # as a solve failure that looks like the challenge was hard.
+        "proxyPort": str(parts.port or (1080 if scheme.startswith("socks") else 80)),
     }
     if parts.username:
         from urllib.parse import unquote
@@ -156,7 +171,13 @@ class _CloudSolver:
     def _call(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
         response = self._post(f"{self.endpoint}/{path}", {"user-agent": "wayfarer"}, body)
         code = str(response.get("errorDescription") or response.get("error_code") or "")
-        if int(response.get("errorId", 0) or 0) != 0:
+        try:
+            error_id = int(response.get("errorId", 0) or 0)
+        except (TypeError, ValueError):
+            # An errorId that is not a number is not a zero either; treating it
+            # as success would carry a failed task into the polling loop.
+            error_id = 1
+        if error_id != 0:
             raise SolverError(self.provider, code, str(response.get("errorDescription", "")))
         if code.startswith("ERROR"):
             raise SolverError(self.provider, code)
@@ -214,7 +235,8 @@ class _CloudSolver:
             if response.get("status") == "ready":
                 solution = dict(response.get("solution") or {})
                 token = str(solution.get("token") or solution.get("gRecaptchaResponse")
-                            or solution.get("solution") or solution.get("cookie") or solution.get("cf_clearance") or "")
+                            or solution.get("solution") or solution.get("value")
+                            or solution.get("cookie") or solution.get("cf_clearance") or "")
                 cookies = {
                     name: str(value)
                     for name, value in solution.items()
@@ -222,6 +244,12 @@ class _CloudSolver:
                 }
                 if kind == "cf_clearance" and not cookies and token:
                     cookies = {"cf_clearance": token}
+                if not token and not cookies:
+                    # "ready" with nothing in it is a failed solve, not a solved
+                    # page: paying for it and carrying on would just move the
+                    # failure to the form, where it looks like our injection broke.
+                    raise SolverError(self.provider, "ERROR_NO_SOLUTION",
+                                      f"{kind} came back ready with an empty solution: {sorted(solution)}")
                 price = PRICE_PER_1K.get(kind, 0.0)
                 return Solved(
                     kind=kind, token=token, cookies=cookies, provider=self.provider,
@@ -230,7 +258,8 @@ class _CloudSolver:
                 )
             if time.monotonic() > limit:
                 raise SolverError(self.provider, "ERROR_TIMEOUT",
-                                  f"{kind} was still unsolved after {self.timeout:.0f}s")
+                                  f"{kind} was still unsolved after "
+                                  f"{(limit - started):.0f}s")
             time.sleep(self.poll)
 
     def solve(self, kind: str, **kwargs: Any) -> Solved:
@@ -264,8 +293,9 @@ class CapMonster(_CloudSolver):
 class TwoCaptcha(_CloudSolver):
     """2Captcha: human-backed, slower and dearer, better on odd challenge types.
 
-    Fall back to it when CapMonster returns ERROR_CAPTCHA_UNSOLVABLE twice;
-    it no longer sells hCaptcha, so keep CapMonster for that.
+    It no longer sells hCaptcha, so keep CapMonster for that. It also has no task
+    type that returns a ``cf_clearance`` cookie -- AntiCloudflareTaskProxyLess
+    solves the Turnstile *token* -- so ``cf_clearance`` is not offered here.
     """
 
     provider = "2Captcha"
@@ -274,14 +304,19 @@ class TwoCaptcha(_CloudSolver):
     balance_is_get = True
     task_types = {
         "turnstile": "AntiTurnstileTaskProxyLess",
-        "cf_clearance": "AntiCloudflareTaskProxyLess",
         "recaptcha_v2": "RecaptchaV2TaskProxyLess",
         "recaptcha_v3": "RecaptchaV3TaskProxyLess",
     }
 
 
 class SolverChain:
-    """Solvers in order of preference; the first one that answers wins."""
+    """Solvers in order of preference; the first one that answers wins.
+
+    Each gets the task once, and only :class:`SolverError` moves it along: a key
+    with no balance is that provider's problem, and the next provider has a
+    different key, so falling through is the right response. Anything that is
+    not a solver error is a bug and is left to surface.
+    """
 
     def __init__(self, solvers: Sequence[_CloudSolver]) -> None:
         if not solvers:
@@ -321,15 +356,15 @@ def solver_from_env(*, prefer: str = "capmonster") -> Optional[Any]:
 _SET_TOKEN_JS = """
 (args) => {
   const field = args.field, token = args.token;
-  let el = document.querySelector('[name="' + field + '"]') || document.getElementById(field);
+  const el = document.querySelector('[name="' + field + '"]') || document.getElementById(field);
   if (!el) {
-    el = document.createElement('textarea');
-    el.name = field; el.id = field;
-    el.style.display = 'none';
-    (document.body || document.documentElement).appendChild(el);
+    // The widget never wrote its field. Fabricating one would let a form submit
+    // with its real field still empty, and report success on the way past it.
+    return false;
   }
   el.value = token;
-  el.innerHTML = token;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }
 """

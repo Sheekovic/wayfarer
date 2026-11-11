@@ -22,6 +22,7 @@ actually reports.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import WayfarerError
@@ -59,17 +60,25 @@ def camoufox_version() -> Optional[str]:
 
 
 def require_camoufox() -> None:
-    """Fail early, with the actual fix, when Camoufox cannot be used."""
+    """Fail early, with the actual fix, when Camoufox cannot be used.
+
+    The package imports happily with no browser fetched, and the launch failure
+    it then produces is a Playwright error several layers down. Asking for the
+    path without downloading is the cheap check that says "run python -m
+    camoufox fetch" instead.
+    """
     if camoufox_version() is None:
         raise CamoufoxMissing(_INSTALL_HINT)
     try:
-        from camoufox.pkgman import check_assets  # type: ignore[attr-defined]
+        from camoufox.pkgman import camoufox_path  # type: ignore[attr-defined]
+
+        path = str(camoufox_path(download_if_missing=False))
     except Exception:
-        return  # older/newer layout; the launch itself will report the problem
-    try:
-        check_assets()
-    except Exception as exc:
-        raise CamoufoxMissing(f"Camoufox's browser is not installed: {exc}. {_INSTALL_HINT}") from None
+        # A layout this release does not know: let the launch report it rather
+        # than claim the browser is missing when it might be right there.
+        return
+    if not os.path.isdir(path):
+        raise CamoufoxMissing(f"Camoufox's browser is not installed (looked in {path}). {_INSTALL_HINT}")
 
 
 # -- the WebGL string --------------------------------------------------------
@@ -167,10 +176,15 @@ def launch_kwargs(persona: Persona, *, headless: bool = True, proxy: Optional[st
         kwargs["ff_version"] = persona.ff_version
     kwargs.update(options)
     if config:
-        # Config keys we set by hand would otherwise draw Camoufox's "you know
-        # what you are doing" warning on every launch.
         kwargs["config"] = {**kwargs.get("config", {}), **config}
-        kwargs.setdefault("i_know_what_im_doing", True)
+    # Camoufox prints one warning per launch that canvas and WebGL readback are
+    # randomised, because the identity claims another GPU than this machine's and
+    # its own canvas would betray that. That is the choice, not an oversight:
+    # noise makes the browser look like a hardened Firefox, while the real canvas
+    # would contradict the WebGL string in a way any page can read. We take the
+    # hardened look, so the warning is answered once, here, instead of on the
+    # user's stderr on every render.
+    kwargs.setdefault("i_know_what_im_doing", True)
     return kwargs
 
 
@@ -209,7 +223,9 @@ def _chunk_size(env: Dict[str, Any], keys: List[str]) -> int:
     """Recover the launcher's chunk size so the payload re-splits identically."""
     if len(keys) > 1:
         return len(str(env[keys[0]]))
-    return _WIN_CHUNK
+    # One chunk cannot tell us the size it was cut at, so use the launcher's own:
+    # Windows environment strings are capped far lower than POSIX ones.
+    return _WIN_CHUNK if os.name == "nt" else _OTHER_CHUNK
 
 
 def patch_webgl(from_options: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
@@ -249,16 +265,18 @@ def patch_webgl(from_options: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
     # ANSI code page, so escaping non-ASCII characters is the safe form.
     payload = json.dumps(config, separators=(",", ":"), ensure_ascii=True)
     size = _chunk_size(env, keys)
-    for index, key in enumerate(keys):
-        start = index * size
-        env[key] = payload[start:start + size]
-    tail = len(keys) * size
-    if len(payload) > tail:
-        index = len(keys)
-        while tail < len(payload):
-            env[f"{_CONFIG_PREFIX}{index + 1}"] = payload[tail:tail + size]
-            tail += size
-            index += 1
+    chunks = max(-(-len(payload) // size), 1)
+    written = set()
+    for index in range(chunks):
+        key = f"{_CONFIG_PREFIX}{index + 1}"
+        env[key] = payload[index * size:(index + 1) * size]
+        written.add(key)
+    for key in list(env):
+        # Anything numbered past what we wrote would still be concatenated by
+        # the browser, and a leftover piece of the old payload reads as a GPU
+        # string we never meant to send.
+        if str(key).startswith(_CONFIG_PREFIX) and str(key) not in written:
+            del env[key]
     return from_options, True
 
 

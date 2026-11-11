@@ -6,11 +6,12 @@ fake transport. The live checks -- Camoufox actually launching, the WebGL
 string actually landing -- are in tests/test_live.py and skipped by default.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
-from wayfarer import Session, SolverError
+from wayfarer import AsyncSession, Session, SolverError
 from wayfarer.challenges import (
     challenge_kind,
     detect_challenge,
@@ -130,18 +131,43 @@ def test_webgl_patch_rewrites_and_rechunks_the_payload():
     payload = '{"webGl:vendor":"Google Inc. (Intel)","webGl:renderer":"ANGLE (Intel, Intel(R) HD Graphics 400 ' \
               'Direct3D11 vs_5_0 ps_5_0), or similar","screen.width":2560}'
     size = 64
-    env = {f"CAMOU_CONFIG_{i + 1}": payload[i:i + size] for i in range(0, len(payload), size)}
+    pieces = [payload[i:i + size] for i in range(0, len(payload), size)]
+    env = {f"CAMOU_CONFIG_{index + 1}": piece for index, piece in enumerate(pieces)}   # 1-based, as Camoufox names them
     assert len(env) > 1
     options, applied = patch_webgl({"env": env})
-    joined = "".join(options["env"][k] for k in sorted(env, key=lambda k: int(k.split("_")[-1])))
+    names = sorted(options["env"], key=lambda k: int(k.split("_")[-1]))
+    joined = "".join(options["env"][k] for k in names)
     assert applied and ", or similar" not in joined and ", D3D11)" in joined
     assert '"screen.width":2560' in joined        # everything else survives
+    assert len(names) <= len(pieces) + 1          # it re-splits, it does not spray
 
 
 def test_webgl_patch_declines_rather_than_corrupting():
     options, applied = patch_webgl({"env": {"CAMOU_CONFIG_1": "not json"}})
     assert applied is False and options["env"]["CAMOU_CONFIG_1"] == "not json"
     assert patch_webgl({})[1] is False
+
+
+def test_a_shorter_payload_leaves_no_chunk_behind():
+    """The browser concatenates every CAMOU_CONFIG_*, so a stale one is a lie."""
+    renderer = "ANGLE (X, Y vs_5_0 ps_5_0), or similar"        # 38 chars, cleans to 33
+    payload = '{"webGl:renderer":"%s"}' % renderer
+    size = 27                                                  # 59 chars -> 3 chunks, 54 -> 2
+    env = {f"CAMOU_CONFIG_{i // size + 1}": payload[i:i + size] for i in range(0, len(payload), size)}
+    assert len(env) == 3
+    options, applied = patch_webgl({"env": env})
+    assert applied and len(options["env"]) == 2
+    joined = "".join(options["env"][k] for k in sorted(options["env"], key=lambda k: int(k.split("_")[-1])))
+    assert ", or similar" not in joined and ", D3D11)" in joined
+    assert json.loads(joined)["webGl:renderer"].endswith(", D3D11)")
+
+
+def test_a_stray_chunk_is_left_alone_rather_than_guessed_at():
+    """An unparseable payload is declined, not repaired by guesswork."""
+    env = {"CAMOU_CONFIG_1": '{"webGl:renderer":"X, or similar"}', "CAMOU_CONFIG_2": "junk"}
+    before = dict(env)
+    options, applied = patch_webgl({"env": env})
+    assert applied is False and options["env"] == before
 
 
 # -- verification ------------------------------------------------------------
@@ -364,6 +390,29 @@ def test_a_token_goes_to_the_field_the_widget_wrote():
 
 # -- the ladder --------------------------------------------------------------
 
+def test_doctor_answers_every_question_it_exists_for():
+    """Every line of doctor is a question someone asked at 2 a.m.; none may crash."""
+    from wayfarer.__main__ import _doctor
+
+    facts = _doctor()
+    assert facts["wayfarer"] and facts["python"]
+    assert "curl_cffi" in facts and "playwright" in facts
+    assert "camoufox" in facts and "camoufox browser" in facts
+    assert "CapMonster key" in facts and "2Captcha key" in facts
+    assert "profiles" in facts
+
+
+def test_camoufox_is_reported_before_anything_launches():
+    from wayfarer.stealth import CamoufoxMissing, require_camoufox
+
+    # The check must actually run: it once raised NameError past the version
+    # probe, and every live test died with it.
+    try:
+        assert require_camoufox() is None
+    except CamoufoxMissing as exc:
+        assert "camoufox fetch" in str(exc)
+
+
 def test_the_priority_header_is_computed_even_if_curl_cffi_owns_sending_it():
     headers = build_headers(get_profile("chrome"), mode=FETCH, method="GET", url="https://x.test/api",
                             page_url="https://x.test/", languages=LANGS)
@@ -491,3 +540,140 @@ def test_an_unsolved_challenge_marks_the_persona(site, monkeypatch):
             s.visit(site.url + "/cf")
     assert persona.trust_for("127.0.0.1") == "unsolved"
     assert persona.hosts["127.0.0.1"].vendor == "Cloudflare"
+
+
+def test_a_browser_that_could_not_load_is_not_a_verdict(site, monkeypatch):
+    """A proxy that was briefly down must not spend the host's one ladder walk."""
+    from wayfarer import ChallengeError, RenderError
+
+    attempts = []
+
+    def flaky_render(url, **kwargs):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise RenderError("could not reach the browser: proxy refused")
+        return snapshot(url, 200, "<h1>the article</h1>")
+
+    monkeypatch.delenv("CAPMONSTER_API_KEY", raising=False)
+    with Session(on_challenge="solve", **dict(delay=0)) as s:
+        monkeypatch.setattr(s, "render", flaky_render)
+        with pytest.raises(ChallengeError) as first:
+            s.visit(site.url + "/cf-clears")
+        assert "browser rung failed" in " ".join(first.value.trail)
+        response = s.visit(site.url + "/cf-clears")           # the second chance still exists
+    assert response.status_code == 200
+    assert len(attempts) == 1                                 # and it did not loop
+
+
+@pytest.mark.parametrize(
+    "user_agent,expect",
+    [
+        ("Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0", "128.0"),
+        ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+         "Version/17.4 Safari/605.1.15", ""),
+        ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36", ""),
+    ],
+)
+def test_the_browser_version_is_the_one_the_user_agent_states(user_agent, expect):
+    """Safari's user agent ends in "Safari/605.1.15"; splitting on Firefox/ returns the lot."""
+    from wayfarer.session import _firefox_version
+
+    assert _firefox_version(user_agent) == expect
+
+
+def test_the_ladder_works_the_same_way_on_the_async_session(site, monkeypatch):
+    import asyncio
+
+    solver = FakeSolver()
+
+    class AsyncLadderPage(LadderPage):
+        """The same page, spoken in the awaitable dialect an async session uses."""
+
+        async def evaluate(self, script, arg=None):
+            return LadderPage.evaluate(self, script, arg)
+
+        async def click(self, selector, timeout=0):
+            return LadderPage.click(self, selector)
+
+        async def content(self):
+            return self.html
+
+        async def wait_for_load_state(self, state, timeout=0):
+            return None
+
+    async def fake_render(url, **kwargs):
+        page = AsyncLadderPage(url, '<div class="cf-turnstile" data-sitekey="0x4AAAAAAACEjISTEalY4zYF"></div>',
+                               "<h1>the article</h1>")
+        hook = kwargs.get("on_page")
+        if hook is not None:
+            outcome = hook(page, snapshot(url, 403, page.html))
+            if asyncio.iscoroutine(outcome):
+                outcome = await outcome
+            results.append(outcome)
+        return snapshot(url, 200, "<h1>the article</h1>")
+
+    results = []
+
+    async def run():
+        async with AsyncSession(on_challenge="solve", solver=solver, delay=0) as s:
+            s.render = fake_render
+            return await s.visit(site.url + "/cf-clears")
+
+    response = asyncio.run(run())
+    assert response.status_code == 200
+    assert results == [True] and solver.asks[0]["kind"] == "turnstile"
+
+
+def test_a_solver_that_returns_value_is_not_a_wasted_payment():
+    """Providers put the token in different places; losing it is losing money."""
+    transport = FakeTransport([{"errorId": 0, "taskId": 1},
+                              {"errorId": 0, "status": "ready", "solution": {"value": "V1"}}])
+    solved = CapMonster("k", transport=transport, poll=0).solve("turnstile", sitekey="S",
+                                                                url="https://x.test/")
+    assert solved.token == "V1"
+
+
+def test_ready_with_nothing_in_it_is_not_solved():
+    transport = FakeTransport([{"errorId": 0, "taskId": 1},
+                              {"errorId": 0, "status": "ready", "solution": {}}])
+    with pytest.raises(SolverError) as info:
+        CapMonster("k", transport=transport, poll=0).solve("turnstile", sitekey="S", url="https://x.test/")
+    assert info.value.code == "ERROR_NO_SOLUTION"
+
+
+def test_a_dead_call_says_so_instead_of_naming_a_provider():
+    from wayfarer.solvers import _transport_error
+
+    error = _transport_error("https://api.capmonster.cloud/createTask", ValueError("no json"))
+    assert error.provider == "solver API" and error.code == "BAD_RESPONSE"
+
+
+def test_hcaptcha_has_its_own_field_name():
+    page = FakePage()
+    assert apply_token(page, "hcaptcha", "T") is True
+    assert page.evaluated[0]["field"] == "h-captcha-response"
+
+
+def test_a_page_with_no_field_says_so():
+    class NoFieldPage(FakePage):
+        def evaluate(self, script, arg=None):
+            self.evaluated.append(arg)
+            return False                      # the widget never wrote its input
+
+    assert apply_token(NoFieldPage(), "turnstile", "T") is False
+
+
+def test_a_new_proxy_gets_its_own_browser_and_forgets_the_old_geography():
+    """Camoufox resolves geography from the exit address, so it belongs to that proxy."""
+    from wayfarer.camoufox_host import CamoufoxBrowserHost
+
+    persona = Persona.new()
+    persona.timezone = "Europe/Berlin"
+    persona.exit_ip = "1.2.3.4"
+    host = CamoufoxBrowserHost(persona)
+    host._browser, host._headless, host._proxy_key = object(), True, "http://a.test:1080"
+    assert host._reusable(True, "http://a.test:1080") is True
+    assert host._reusable(True, "http://b.test:1080") is False
+    host._forget_geography("http://b.test:1080")
+    assert persona.timezone is None and persona.exit_ip is None
+    assert "another exit address" in " ".join(persona.notes)

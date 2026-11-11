@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-from .detect import collect_signals
+from .detect import collect_signals, collect_signals_async
 from .errors import RenderError, WayfarerError
 from .profiles import Profile
 
@@ -193,7 +193,13 @@ class BrowserHost:
         browser = self._ensure(headless)
         from playwright.sync_api import Error
 
-        context = browser.new_context(**_context_options(locale, proxy))
+        try:
+            context = browser.new_context(**_context_options(locale, proxy))
+        except Error as exc:
+            # A dead pooled proxy usually fails here, before there is a page at
+            # all. Left unwrapped it escapes as a raw Playwright error, and the
+            # one place rotation is needed is the place that would skip it.
+            raise _render_error(url, exc) from exc
         try:
             if cookies:
                 context.add_cookies(cookies)
@@ -204,10 +210,13 @@ class BrowserHost:
             response = page.goto(url, wait_until=wait_until, timeout=ms, referer=referer)
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=ms)
+            # Read the browser back before touching it, so anything done in
+            # on_page acts on the identity as it was actually served.
+            self.signals = collect_signals(page)
             if on_page is not None:
                 on_page(page, _page_result(page.url, response, page.content(), page.title(), calls))
                 calls = list(calls)
-            self.signals = collect_signals(page)
+                self.signals = collect_signals(page)
             result = _page_result(page.url, response, page.content(), page.title(), calls)
             return result, context.cookies()
         except Error as exc:
@@ -266,7 +275,12 @@ class AsyncBrowserHost:
         browser = await self._ensure(headless)
         from playwright.async_api import Error
 
-        context = await browser.new_context(**_context_options(locale, proxy))
+        try:
+            context = await browser.new_context(**_context_options(locale, proxy))
+        except Error as exc:
+            # See the sync twin: a dead proxy fails here, and rotation depends on
+            # it arriving as a RenderError.
+            raise _render_error(url, exc) from exc
         try:
             if cookies:
                 await context.add_cookies(cookies)
@@ -277,12 +291,13 @@ class AsyncBrowserHost:
             response = await page.goto(url, wait_until=wait_until, timeout=ms, referer=referer)
             if wait_for:
                 await page.wait_for_selector(wait_for, timeout=ms)
+            self.signals = await collect_signals_async(page)
             if on_page is not None:
                 outcome = on_page(page, _page_result(page.url, response, await page.content(),
                                                      await page.title(), calls))
                 if asyncio.iscoroutine(outcome):
                     await outcome
-            self.signals = collect_signals(page)
+                self.signals = await collect_signals_async(page)
             result = _page_result(page.url, response, await page.content(), await page.title(),
                                   calls)
             return result, await context.cookies()

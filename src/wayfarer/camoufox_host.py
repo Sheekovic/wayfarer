@@ -26,7 +26,7 @@ from .browser import (
     _recorder,
     _render_error,
 )
-from .detect import collect_signals
+from .detect import collect_signals, collect_signals_async
 from .errors import RenderError, WayfarerError
 from .personas import Persona, resolve
 
@@ -49,6 +49,10 @@ class _HostBase:
         self._pw: Any = None
         self._browser: Any = None
         self._headless: Optional[bool] = None
+        # The proxy the running browser was started behind. Camoufox resolves
+        # the timezone, geography and WebRTC claims from that exit address, so a
+        # new proxy is a different visitor and gets a new browser.
+        self._proxy_key: Optional[str] = None
 
     def _kwargs(self, headless: bool, proxy: Optional[str]) -> Dict[str, Any]:
         stealth.draw_preset(self.persona)
@@ -65,7 +69,15 @@ class _HostBase:
         """Camoufox's own launch options, with the WebGL string rewritten."""
         from camoufox.utils import launch_options
 
-        options = launch_options(**self._kwargs(headless, proxy))
+        try:
+            options = launch_options(**self._kwargs(headless, proxy))
+        except Exception as exc:
+            # This can launch a throwaway Camoufox of its own to read the
+            # machine's GPU, so it fails the way a launch fails -- and has to
+            # arrive as a RenderError, or the session's retry and proxy
+            # rotation never see it.
+            raise RenderError(f"could not build the Camoufox launch: "
+                              f"{str(exc).strip().splitlines()[0]}", network=True) from exc
         options, applied = stealth.patch_webgl(options)
         self.webgl_patched = applied
         if not applied:
@@ -85,6 +97,23 @@ class _HostBase:
         if renderer and stealth.ARTIFACT in renderer:
             self.persona.note("the WebGL string still carries Camoufox's ', or similar' tell")
 
+    def _forget_geography(self, proxy: Optional[str]) -> None:
+        """A new exit address makes the remembered one a guess, not a fact.
+
+        The measured timezone is a fact about the address the browser last
+        exited from. Reusing it behind a different proxy would pin a stranger's
+        clock to this one, and no check could tell, because both the claim and
+        the browser would agree with each other.
+        """
+        if self.persona.timezone or self.persona.exit_ip:
+            self.persona.note("dropped the remembered timezone: it belonged to another exit address")
+            self.persona.timezone = None
+            self.persona.exit_ip = None
+
+    def _reusable(self, headless: bool, proxy: Optional[str]) -> bool:
+        return (self._browser is not None and self._headless == headless
+                and self._proxy_key == proxy)
+
     def _ensure_started(self) -> None:
         if self._pw is None:
             raise WayfarerError("the Camoufox browser has not been started")
@@ -101,7 +130,7 @@ class _HostBase:
 
     def _closed(self) -> Tuple[None, None]:
         browser, pw = self._browser, self._pw
-        self._browser = self._pw = self._headless = None
+        self._browser = self._pw = self._headless = self._proxy_key = None
         return browser, pw
 
 
@@ -109,8 +138,10 @@ class CamoufoxBrowserHost(_HostBase):
     """One lazily started Camoufox browser for a sync session."""
 
     def _ensure(self, headless: bool, proxy: Optional[str]) -> Any:
-        if self._browser is not None and self._headless == headless:
+        if self._reusable(headless, proxy):
             return self._browser
+        if self._proxy_key is not None and self._proxy_key != proxy:
+            self._forget_geography(proxy)
         self.close()
         stealth.require_camoufox()
         from camoufox.sync_api import NewBrowser
@@ -126,6 +157,7 @@ class CamoufoxBrowserHost(_HostBase):
             raise RenderError(f"could not start Camoufox: {str(exc).strip().splitlines()[0]}",
                               network=False) from exc
         self._headless = headless
+        self._proxy_key = proxy
         return self._browser
 
     def render(self, url: str, *, cookies: List[dict], proxy: Optional[str], locale: str,
@@ -134,7 +166,13 @@ class CamoufoxBrowserHost(_HostBase):
         browser = self._ensure(headless, proxy)
         from playwright.sync_api import Error
 
-        context = browser.new_context(**_context_options(locale, proxy))
+        try:
+            context = browser.new_context(**_context_options(locale, proxy))
+        except Error as exc:
+            # A dead pooled proxy most often fails right here, before there is a
+            # page; it has to reach the session as a RenderError so the proxy
+            # gets rotated instead of the run dying on a Playwright error.
+            raise _render_error(url, exc) from exc
         try:
             if cookies:
                 context.add_cookies(cookies)
@@ -145,12 +183,15 @@ class CamoufoxBrowserHost(_HostBase):
             response = page.goto(url, wait_until=wait_until, timeout=ms, referer=referer)
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=ms)
+            # Read the browser back before touching it: a solver asked for the
+            # user agent must be told the one this page was served with.
+            self.note_rendered(collect_signals(page))
             if on_page is not None:
                 # Runs while the page is still open, so a challenge can be solved
                 # in the same identity that was served it.
                 on_page(page, _page_result(page.url, response, page.content(), page.title(), calls))
+                self.note_rendered(collect_signals(page))
             result = _page_result(page.url, response, page.content(), page.title(), calls)
-            self.note_rendered(collect_signals(page))
             return result, context.cookies()
         except Error as exc:
             raise _render_error(url, exc) from exc
@@ -171,8 +212,10 @@ class AsyncCamoufoxBrowserHost(_HostBase):
     """One lazily started Camoufox browser for an async session."""
 
     async def _ensure(self, headless: bool, proxy: Optional[str]) -> Any:
-        if self._browser is not None and self._headless == headless:
+        if self._reusable(headless, proxy):
             return self._browser
+        if self._proxy_key is not None and self._proxy_key != proxy:
+            self._forget_geography(proxy)
         await self.close()
         stealth.require_camoufox()
         from camoufox.async_api import AsyncNewBrowser
@@ -188,6 +231,7 @@ class AsyncCamoufoxBrowserHost(_HostBase):
             raise RenderError(f"could not start Camoufox: {str(exc).strip().splitlines()[0]}",
                               network=False) from exc
         self._headless = headless
+        self._proxy_key = proxy
         return self._browser
 
     async def render(self, url: str, *, cookies: List[dict], proxy: Optional[str], locale: str,
@@ -196,7 +240,10 @@ class AsyncCamoufoxBrowserHost(_HostBase):
         browser = await self._ensure(headless, proxy)
         from playwright.async_api import Error
 
-        context = await browser.new_context(**_context_options(locale, proxy))
+        try:
+            context = await browser.new_context(**_context_options(locale, proxy))
+        except Error as exc:
+            raise _render_error(url, exc) from exc
         try:
             if cookies:
                 await context.add_cookies(cookies)
@@ -207,14 +254,15 @@ class AsyncCamoufoxBrowserHost(_HostBase):
             response = await page.goto(url, wait_until=wait_until, timeout=ms, referer=referer)
             if wait_for:
                 await page.wait_for_selector(wait_for, timeout=ms)
+            self.note_rendered(await collect_signals_async(page))
             if on_page is not None:
                 outcome = on_page(page, _page_result(page.url, response, await page.content(),
                                                      await page.title(), calls))
                 if asyncio.iscoroutine(outcome):
                     await outcome
+                self.note_rendered(await collect_signals_async(page))
             result = _page_result(page.url, response, await page.content(), await page.title(),
                                   calls)
-            self.note_rendered(collect_signals(page))
             return result, await context.cookies()
         except Error as exc:
             raise _render_error(url, exc) from exc
