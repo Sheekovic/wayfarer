@@ -24,11 +24,14 @@ dependencies = ["curl_cffi>=0.14"]
 # Render pages in the browser already on the machine.
 browser = ["playwright>=1.40"]
 # Render in Camoufox, whose fingerprint is spoofed in the engine. Camoufox
-# downloads its own ~200 MB Firefox build on first use.
-stealth = ["camoufox>=0.5.9", "playwright>=1.40"]
+# downloads its own ~200 MB Firefox build on first use, needs Python 3.10+, and
+# pins Playwright below 1.63: its browser speaks the older protocol, and a newer
+# driver fails inside new_context. Only this extra carries the cap, because the
+# plain browser path is happy with a newer Playwright.
+stealth = ["camoufox>=0.5.9", "playwright>=1.40,<1.63"]
 # CAPTCHA solving needs no extra package, only a key: CAPMONSTER_API_KEY or
 # TWOCAPTCHA_API_KEY.
-dev = ["pytest>=8", "playwright>=1.40", "camoufox>=0.5.9"]
+dev = ["pytest>=8", "playwright>=1.40,<1.63", "camoufox>=0.5.9"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

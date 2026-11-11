@@ -54,10 +54,49 @@ about the sites that were not convinced.
 
 ### Fixed
 
+- **`stealth` now caps Playwright below 1.63**, which is Camoufox 0.5.9's own
+  ceiling. With a newer Playwright every Camoufox context fails inside
+  `new_context` with a protocol error that reads like a broken browser;
+  `doctor` now prints the pairing (`1.62.0 satisfies playwright (<1.63)`) and
+  no longer downloads 200 MB just to answer a question.
+- A context-creation failure — a dead pooled proxy most often — escaped as a raw
+  Playwright error instead of `RenderError`, in all four browser paths, so
+  `render()` retried nothing and the proxy that needed rotating was never rotated.
+- `Session.signals` on an async session held a coroutine instead of measurements:
+  the sync signal probe was run against an async page, where `evaluate` returns
+  an awaitable and the JavaScript never runs. An async session therefore believed
+  its own browser was clean.
+- A browser that failed to load spent the host's single ladder walk: the next
+  challenge on that host was then refused by wayfarer's own bookkeeping
+  ("already walked") even though nothing had been tried.
+- hCaptcha tokens were written to `g-recaptcha-response` instead of
+  `h-captcha-response`, and a page that had no field at all got one fabricated
+  for it, so a failed injection reported success.
+- A solver answering in `solution.value`, or answering "ready" with an empty
+  solution, was treated as solved: the task was paid for and the token discarded.
+- `identity["browser_version"]` returned `Mozilla/5.0` for any non-Firefox user
+  agent, because splitting on `Firefox/` returns the whole string when the
+  separator is missing.
+- `require_camoufox()` called a helper that does not exist in the pinned release,
+  so the "run python -m camoufox fetch" hint never fired.
 - Tests no longer assume `curl_cffi` forwards a caller-supplied `Priority`
   header: 0.17 stopped forwarding it for Chrome targets (it emulates stream
   priority itself). Firefox targets still do, and the header wayfarer computes
   is asserted directly in `tests/test_stealth.py`.
+
+### Changed
+
+- A solver is now asked with the user agent the **live browser** is sending, not
+  the one the persona's device record was written with; Cloudflare binds its
+  clearance to the exact string that earned it.
+- A Camoufox browser is not reused across proxies: the timezone, geography and
+  WebRTC claims were resolved from the old exit address. Changing proxy also
+  drops the remembered timezone, which would otherwise pin a former exit's clock
+  to the new one forever, invisibly.
+- Measured, and now documented as a limit: Camoufox 0.5.9 re-randomises **canvas**
+  readback per launch, so a canvas hash does not carry a returning visitor across
+  sessions, while the user agent, GPU strings, screen, timezone, locale and
+  cookies of a saved persona do (audio and WebGL-parameter draws match).
 
 ### Notes
 

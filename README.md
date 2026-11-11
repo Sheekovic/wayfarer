@@ -209,15 +209,17 @@ solver = solver_from_env()                        # CapMonster first, then 2Capt
 
 `CapMonster().balance()` is the quickest way to find out whether a key works
 before blaming the site. CapMonster is tried first: it is faster, cheaper, and
-the only one of the two that returns a `cf_clearance` cookie. A
-`solver=Solved(...)` result records the token, the seconds and the cost, so
-spending is never silent.
+the only one of the two that returns a `cf_clearance` cookie. Every solve comes
+back as a `Solved` record carrying the token, the seconds waited and the
+approximate cost, so spending is never silent.
 
-A solved Cloudflare challenge returns `cf_clearance`, which is bound to the IP
-*and* the user agent that earned it. wayfarer only replays it after checking
-that the plain-HTTP path presents the same browser as the one that was solved;
-if they disagree, it keeps using the browser for that site and says so in the
-trail instead of failing mysteriously.
+A solved Cloudflare challenge returns `cf_clearance`, which Cloudflare binds to
+the IP *and* the user agent that earned it. wayfarer asks the solver with the
+user agent the live browser was actually sending — not the one the persona's
+device record was written with, which is usually an older Firefox — then
+replays the cookie over the plain path. If the plain path is still challenged,
+which is most often the two Firefox versions disagreeing, `ChallengeError.trail`
+says that rather than leaving you to guess why a solved page still 403s.
 
 ## Measuring the disguise
 
@@ -264,8 +266,10 @@ Known limits:
 - `visit()` and `fetch()` run no JavaScript; use `render()` or call the page's API with `fetch()`.
 - `render()` does not emulate mobile devices, so the mobile profiles stay HTTP-only.
 - Camoufox is a **Firefox**. Sites that lean on Chrome or V8-specific behaviour need a real Chrome; that path is planned and is not a better version of this one.
-- Camoufox's browser and `curl_cffi`'s newest Firefox target can disagree on version (Camoufox 158 vs `curl_cffi`'s 144 at the time of writing). `doctor` prints both; a solved cookie is only replayed when the two agree on the user agent.
+- Camoufox's browser and `curl_cffi`'s newest Firefox target can disagree on version (158 against 155 on the machine writing this). They drift in opposite directions: Camoufox ships a beta of whatever Firefox it forked, `curl_cffi` adds a target when Firefox stabilises. `doctor` prints both; a solved cookie is only replayed when the two agree on the user agent.
 - Camoufox's GPU records all end in `", or similar"` — 10 of 11 Windows entries, and every macOS one — which is not a string any real driver writes. wayfarer rewrites it into the shape Firefox reports and then reads it back out of the live page to confirm the rewrite landed.
+- Camoufox re-randomises **canvas** readback on every launch rather than seeding it from the pinned identity (measured on 0.5.9: audio and WebGL parameter draws match across launches of one saved persona, the canvas hash does not). Everything else a persona pins — user agent, GPU strings, screen, timezone, locale, cookies — does carry over. A site that recognises visitors by canvas alone will see the same persona as a new visitor each run; `python -m wayfarer diagnose` is how you find out if that has changed.
+- Camoufox warns on stderr that canvas noise is on, because a persona that claims another OS gets noise rather than this machine's real canvas. That is the trade we choose: a canvas belonging to a different GPU is a worse tell than a hardened one.
 - CAPTCHA solving is a paid third party: 10–40 s of latency, roughly $0.60–2.50 per thousand, and solvable-but-still-blocked happens. It is opt-in, and `on_challenge` defaults to `"raise"` so nothing starts spending money on its own.
 - Headers are computed for the first hop; redirects are followed by libcurl with the same headers.
 - Same-site detection uses a small heuristic, not the full Public Suffix List.

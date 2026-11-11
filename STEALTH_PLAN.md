@@ -14,7 +14,7 @@ Everything below was measured on this machine today, not assumed.
 
 Same probe (24 browser signals + the classic bot test page), run twice:
 
-| Signal | `render()` today (real Chrome, headless) | Camoufox 0.4.11, default launch |
+| Signal | `render()` today (real Chrome, headless) | Camoufox 0.5.9, default launch |
 | --- | --- | --- |
 | `navigator.webdriver` | **true** — instant fail | false |
 | User-Agent | `HeadlessChrome/157.0.0.0` — **says headless** | `Firefox/158.0` (no headless marker) |
@@ -41,12 +41,14 @@ is what everyone else already ships. Two defects I hit in a single default launc
 
 And one blocker specific to wayfarer, found by checking the versions:
 
-- Camoufox's build is **Firefox 158.0.1-beta.41**. `curl_cffi` 0.14.0 tops out at
-  **firefox144**. So the browser and the plain-HTTP side of one session currently
+- Camoufox's build is **Firefox 158.0.1-beta.41**. `curl_cffi` 0.14.0 topped out at
+  **firefox144** when this was measured; 0.17.0 reaches **firefox155**, which narrows the
+  gap but does not close it. So the browser and the plain-HTTP side of one session
   disagree on the browser version — which matters because Cloudflare binds `cf_clearance`
   to the exact User-Agent (and is sensitive to the TLS/HTTP2 fingerprint behind it).
-  Handing a solved `cf_clearance` from the browser to `fetch()` today would carry a UA
-  mismatch and silently fail.
+  Handing a solved `cf_clearance` from the browser to `fetch()` would carry a UA
+  mismatch and silently fail. `python -m wayfarer doctor` prints both versions, and the
+  solver is asked with the UA the live browser is sending rather than the recorded one.
 - `render()` also throws away all browser state after each call (`new_context()` … `close()`),
   so nothing a challenge granted survives the call.
 
@@ -270,6 +272,28 @@ it is the honest answer for Chrome-only sites that test V8 quirks Camoufox canno
    for P3, not a public demo page.
 3. Nod on keeping the defaults as they are (`stealth=False`, `on_challenge="raise"`), so the
    library's current honest behaviour stays honest unless you ask for the heavier tools.
+
+---
+
+## 9. What the finished build measures (P0–P4, same machine)
+
+Not a plan any more — these were read out of live browsers while building, and the checks
+are committed as `tests/test_live.py` (run with `WAYFARER_LIVE=1`) plus
+`tests/baselines/*.json`.
+
+| Claim | Measurement |
+| --- | --- |
+| Playwright version matters more than the disguise | Playwright 1.65 (outside Camoufox 0.5.9's declared `<1.63`) fails **every** Camoufox context inside `new_context` with a protocol error. 1.62 works. `doctor` prints the pairing; the `stealth` extra carries the ceiling. |
+| The WebGL rewrite lands | `diagnose` reads the live page: `ANGLE (Intel, Intel(R) HD Graphics 400 Direct3D11 vs_5_0 ps_5_0, D3D11)` — no `", or similar"` — across three launches, headless, Windows. |
+| The disguise reports no contradictions | `diagnose --backends playwright,camoufox`: playwright **2** hard leaks (`webdriver_flag`, `headless_user_agent`), camoufox **0** leaks, and `same as baseline` against the committed baseline. |
+| A persona is the same visitor tomorrow | Two launches from one saved persona file: user agent, WebGL vendor **and** renderer, screen, timezone, `hardwareConcurrency`, platform all identical. Audio and WebGL-parameter draws identical. |
+| …with one honest exception | The **canvas** draw differs between launches: Camoufox 0.5.9 re-randomises canvas per launch rather than seeding it from the pinned identity. Documented as a limit, asserted nowhere, because it is upstream's choice. |
+| The solver ladder works without a paid account | Turnstile sitekey extraction, task shape, polling, token injection and the give-up trail are covered against a fake transport (35 offline checks). The network half has never seen a real key — `doctor --balance` is the first thing to run with one. |
+
+Two things this section exists to stop being rediscovered: the disguise is only as good as
+the *pairing* of its parts (Camoufox ↔ Playwright ↔ `curl_cffi`), and every claim above is a
+`lint()` code or a live test, so a browser update that breaks one shows up as a diff rather
+than as a slow week of 403s.
 
 Suggested order: P0 and P1 need nothing from you and change nothing for existing users —
 I can start there, and the `diagnose` output will tell us how much work P2 really needs.

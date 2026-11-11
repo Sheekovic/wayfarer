@@ -1,0 +1,57 @@
+{
+  "reports": [
+    {
+      "engine": "playwright",
+      "leaks": [
+        {
+          "code": "webdriver_flag",
+          "message": "navigator.webdriver is true; automation is stated outright",
+          "severity": "leak"
+        },
+        {
+          "code": "headless_user_agent",
+          "message": "the user agent names a headless browser: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+          "severity": "leak"
+        }
+      ],
+      "signals": {
+        "appVersion": "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
+        "automationGlobals": [],
+        "deviceMemory": null,
+        "devicePixelRatio": 1,
+        "doNotTrack": null,
+        "hardwareConcurrency": 32,
+        "hasChromeObject": true,
+        "headlessUa": true,
+        "jugglerGlobals": [],
+        "languages": [
+          "en-US"
+        ],
+        "maxTouchPoints": 0,
+        "mimeTypes": 2,
+        "pdfViewerEnabled": true,
+        "platform": "Win32",
+        "plugins": 5,
+        "screen": [
+          1280,
+          720,
+          1280,
+          720,
+          24
+        ],
+        "timezone": "Africa/Cairo",
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36",
+        "webdriver": true,
+        "webglRenderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 5090 (0x00002B85) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "webglVendor": "Google Inc. (NVIDIA)",
+        "window": [
+          1280,
+          720,
+          1280,
+          720
+        ]
+      },
+      "url": "about:blank"
+    }
+  ]
+}

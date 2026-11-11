@@ -1,0 +1,46 @@
+{
+  "reports": [
+    {
+      "engine": "camoufox",
+      "leaks": [],
+      "signals": {
+        "appVersion": "5.0 (Windows)",
+        "automationGlobals": [],
+        "deviceMemory": null,
+        "devicePixelRatio": 1,
+        "doNotTrack": "unspecified",
+        "hardwareConcurrency": 32,
+        "hasChromeObject": false,
+        "headlessUa": false,
+        "jugglerGlobals": [],
+        "languages": [
+          "en-US"
+        ],
+        "maxTouchPoints": 5,
+        "mimeTypes": 2,
+        "pdfViewerEnabled": true,
+        "platform": "Win32",
+        "plugins": 5,
+        "screen": [
+          2048,
+          1152,
+          2048,
+          1104,
+          24
+        ],
+        "timezone": "Africa/Cairo",
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0",
+        "webdriver": false,
+        "webglRenderer": "ANGLE (Intel, Intel(R) HD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "webglVendor": "Google Inc. (Intel)",
+        "window": [
+          1280,
+          720,
+          1280,
+          805
+        ]
+      },
+      "url": "about:blank"
+    }
+  ]
+}
